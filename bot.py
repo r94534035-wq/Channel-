@@ -82,7 +82,13 @@ CYCLE_HOUR_CHOICES = [1, 2, 3]
 # 3 ခါ ဆက်တိုက် ရှုံးရင် (3x) နောက် signal ကနေ pattern mode ပြောင်းသုံးပါတယ်။
 PATTERN_LOSS_TRIGGER = 3
 DEFAULT_CYCLE_HOURS = 1
-MYANMAR_TZ = ZoneInfo("Asia/Rangoon")
+try:
+    MYANMAR_TZ = ZoneInfo("Asia/Yangon")
+except Exception:
+    try:
+        MYANMAR_TZ = ZoneInfo("Asia/Rangoon")
+    except Exception:
+        MYANMAR_TZ = timezone(timedelta(hours=6, minutes=30), "MMT")
 # Admin can choose the requested daily start/close times.  Keep both 12 AM
 # (midnight) and 12 PM (noon) explicit so Telegram does not make them unclear.
 SCHEDULE_TIME_CHOICES = [
