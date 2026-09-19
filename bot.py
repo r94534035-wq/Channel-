@@ -507,37 +507,15 @@ def _start_new_cycle(state: dict, started_at: datetime | None = None) -> dict:
 
 
 def mm_maybe_roll_cycle() -> dict:
-    """Roll to a new cycle only after the 30-win rest is complete.
+    """Keep automatic signals running continuously.
 
-    The selected 1H/2H/3H value is a *rest duration after win 30*.
-    It is not a cycle timeout: reaching the hour while wins are below 30
-    must never reset or pause the bot.
+    Old deployments may still have a saved 30-win rest timestamp. Clear it
+    here so that legacy state cannot pause auto posting after an upgrade.
     """
     state = load_mm_state()
-    now = datetime.now(timezone.utc)
-    hours = int(state.get("cycle_hours", DEFAULT_CYCLE_HOURS))
-    raw_pause = state.get("paused_until")
-    if raw_pause:
-        try:
-            paused_until = _parse_utc(raw_pause)
-        except Exception:
-            logger.warning("Bad paused_until (%r) → resuming signals", raw_pause)
-            return _start_new_cycle(state, now)
-        if int(state.get("win_count", 0) or 0) < WIN_CYCLE_TARGET:
-            logger.warning(
-                "Paused without reaching target (%s/%s) → resuming signals",
-                state.get("win_count"), WIN_CYCLE_TARGET,
-            )
-            return _start_new_cycle(state, now)
-        limit = now + timedelta(hours=hours)
-        if paused_until > limit:
-            logger.warning("paused_until too far ahead → clamped to %sH", hours)
-            paused_until = limit
-            state["paused_until"] = paused_until.isoformat()
-            save_mm_state(state)
-        if now >= paused_until:
-            return _start_new_cycle(state, now)
-        return state
+    if state.get("paused_until"):
+        state["paused_until"] = None
+        save_mm_state(state)
     return state
 
 
@@ -548,16 +526,7 @@ def signals_paused() -> bool:
         return False
     if state.get("manual_pause"):
         return True
-    until = state.get("paused_until")
-    if not until:
-        return False
-    # ကာကွယ်မှု: 30 win မပြည့်ဘဲ ရပ်နေတာ မဖြစ်ရ။
-    if int(state.get("win_count", 0) or 0) < WIN_CYCLE_TARGET:
-        return False
-    try:
-        return datetime.now(timezone.utc) < _parse_utc(until)
-    except Exception:
-        return False
+    return False
 
 
 def pause_remaining_seconds() -> int:
@@ -601,19 +570,13 @@ def mm_toggle_pause() -> bool:
 
 
 def mm_register_win() -> int:
-    """Win → basic amount ပြန်၊ win count တက်သွားမယ် (ရှုံးလည်း 1 က ပြန်မစ)။
-    Total 30 ပြည့်ရင် ရွေးထားတဲ့ အချိန်ပြည့်တဲ့အထိ ခဏရပ်ပါမယ်။"""
+    """Win → basic amount ပြန်ပြီး win count တက်သွားမယ်။ Auto post မရပ်ပါ။"""
     state = mm_maybe_roll_cycle()
     state["level"] = 0
     state["loss_streak"] = 0
     state["win_count"] = int(state.get("win_count", 0)) + 1
     state["win_streak"] = state["win_count"]
-    if state["win_count"] >= WIN_CYCLE_TARGET and not state.get("paused_until"):
-        hours = int(state.get("cycle_hours", DEFAULT_CYCLE_HOURS))
-        now = datetime.now(timezone.utc)
-        # Rest starts exactly when WIN 30 is reached.  Do not use cycle_start:
-        # doing so caused an early/late pause after the first hour boundary.
-        state["paused_until"] = (now + timedelta(hours=hours)).isoformat()
+    state["paused_until"] = None
     save_mm_state(state)
     return state["win_count"]
 
@@ -1798,10 +1761,8 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
     if not config.get("auto_post") or not config.get("channels"):
         return
 
-    # 30 win ပြည့်ပြီး ခဏရပ်ထားချိန်၊ သို့မဟုတ် သတ်မှတ်ထားတဲ့ daily
-    # schedule ပြင်ပမှာ signal မပို့ပါ။
-    force_running = bool(load_mm_state().get("manual_resume"))
-    if signals_paused() or (not force_running and not schedule_is_open()):
+    # Auto post runs 24/7. Only an explicit admin Pause Now can stop it.
+    if signals_paused():
         return
 
     source_signal = await fetch_latest_public_channel_signal()
@@ -1828,15 +1789,17 @@ async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
     # was actually posted in.
     await _settle_auto_pending(context.bot, config, channel_level)
     config = load_channel_config()
-    # Never overwrite a pending signal when neither the direct game-result
-    # endpoint nor the source fallback could settle it yet.
+    # A missing result must never halt auto posting indefinitely. Once a newer
+    # source post exists, discard the unresolved prior pending record without
+    # changing win/loss or pattern state, then continue with the new signal.
     if config.get("auto_pending"):
-        return
+        logger.warning(
+            "Previous auto result is unavailable; clearing pending signal so 24/7 posting continues"
+        )
+        config["auto_pending"] = None
+        save_channel_config(config)
 
-    # Win 30 ရောက်သွားရင် အဲဒီ post အပြီး နောက် signal မပို့ရပါ။
-    # ဒီ re-check မရှိရင် settle လုပ်ပြီးတဲ့အချိန်မှာ signal တစ်ခု ပိုပို့သွားပါတယ်။
-    force_running = bool(load_mm_state().get("manual_resume"))
-    if signals_paused() or (not force_running and not schedule_is_open()):
+    if signals_paused():
         return
 
     # 3 ခါ ဆက်တိုက် ရှုံးရင် (3x) ပုံမှန် reverse/source turn ကို ခဏပြောင်းပြီး
